@@ -104,29 +104,45 @@ def _clean(s: str) -> str:
 
 
 async def search_web(query: str, limit: int = 4) -> list[dict]:
-    """DuckDuckGo HTML search, no API key. Returns title/snippet/url."""
+    """DuckDuckGo search, no API key. Tries html, then lite, then
+    a plain duckduckgo.com search. Render IPs are often bot-blocked
+    on one endpoint, so falling back matters."""
     out: list[dict] = []
-    try:
-        url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
-        async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "Mozilla/5.0"}) as c:
-            r = await c.get(url)
-        if r.status_code != 200:
-            return out
-        body = r.text
-        # Each result: <a class="result__a" href="...">title</a> ... <a class="result__snippet">
-        for m in re.finditer(
-            r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</a>',
-            body, re.S):
-            href, title, snippet = m.groups()
-            # DuckDuckGo wraps links as /l/?uddg=<real url>
-            mm = re.search(r"uddg=([^&]+)", href)
-            if mm:
-                href = urllib.parse.unquote(mm.group(1))
-            out.append({"title": _clean(title), "snippet": _clean(snippet), "url": href})
-            if len(out) >= limit:
+    urls = [
+        "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query),
+        "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote(query),
+        "https://duckduckgo.com/html/?q=" + urllib.parse.quote(query),
+    ]
+    for url in urls:
+        try:
+            async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "Mozilla/5.0"}) as c:
+                r = await c.get(url)
+            if r.status_code != 200:
+                continue
+            body = r.text
+            for m in re.finditer(
+                r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</a>',
+                body, re.S):
+                href, title, snippet = m.groups()
+                mm = re.search(r"uddg=([^&]+)", href)
+                if mm:
+                    href = urllib.parse.unquote(mm.group(1))
+                out.append({"title": _clean(title), "snippet": _clean(snippet), "url": href})
+                if len(out) >= limit:
+                    break
+            # Lite endpoint uses result-link / result-snippet classes.
+            if not out:
+                for m in re.finditer(
+                    r'class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result-snippet"[^>]*>(.*?)</td>',
+                    body, re.S):
+                    href, title, snippet = m.groups()
+                    out.append({"title": _clean(title), "snippet": _clean(snippet), "url": href})
+                    if len(out) >= limit:
+                        break
+            if out:
                 break
-    except Exception:
-        pass
+        except Exception:
+            continue
     return out
 
 
@@ -164,7 +180,12 @@ async def bgg_search(game_query: str) -> dict | None:
                 return el.get("value") if el is not None else None
             desc_el = thing.find("description")
             desc = _clean(desc_el.text) if desc_el is not None and desc_el.text else ""
-            mechanics = [m.get("value") for m in thing.findall("link[@type='boardgamemechanic']")]
+            # Manual filter, not an XPath predicate: the predicate form
+            # can raise on some ET versions and would wipe the whole result.
+            mechanics = []
+            for link in thing.findall("link"):
+                if link.get("type") == "boardgamemechanic" and link.get("value"):
+                    mechanics.append(link.get("value"))
             return {
                 "name": name,
                 "year": _t("yearpublished"),
@@ -236,7 +257,10 @@ BOARD_HINTS = [
 ]
 
 def classify(text: str) -> str:
-    """Returns 'greeting' | 'test' | 'non_board' | 'board' | 'unclear'"""
+    """Returns 'greeting' | 'test' | 'non_board' | 'board' | 'unclear'
+    Fix 2026-10-25: a bare game name like 'Tabriz', or 'اسم بازی Tabriz',
+    was wrongly 'unclear'. In a board-game group, a short message with
+    a Latin game name is a board-game question, not a clarification."""
     t = text.strip()
     low = t.lower()
     if low in ("test", "تست"):
@@ -247,14 +271,20 @@ def classify(text: str) -> str:
         return "non_board"
     if any(w in low for w in BOARD_HINTS) or "?" in t or "؟" in t:
         return "board"
+    if re.search(r"[A-Za-z]{3,}", t) and len(t) <= 40:
+        return "board"
     return "unclear"
 
 
 async def answer_board_question(question: str) -> str:
     game = extract_game_name(question)
-    # Evidence: web search on the question, plus BGG if a game name was found.
+    # Evidence: BGG first (most reliable for a game name), then web.
+    # Web search on the full Persian question often returns city /
+    # unrelated results, so also search "game + board game" in English.
+    bgg = await bgg_search(game) if game else None
     web = await search_web(f"{question} board game", limit=3)
-    bgg = await bgg_search(game) if game and game != question else None
+    if not web and game:
+        web = await search_web(f"{game} board game", limit=3)
     evidence_parts: list[str] = []
     if bgg:
         evidence_parts.append(
@@ -348,4 +378,4 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None 
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "bot": "BGWOmid_bot", "version": "v2-search-first"}
+    return {"ok": True, "bot": "BGWOmid_bot", "version": "v3-tabriz-fix"}
