@@ -65,7 +65,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 
 import httpx
-from fastapi import FastAPI, Request, Header
+from fastapi import FastAPI, Request, Header, BackgroundTasks
 
 app = FastAPI()
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -327,55 +327,59 @@ async def answer_board_question(question: str) -> str:
 
 
 # ---------- Webhook ----------
+# Fix 2026-10-25 v4: Telegram reported "Read timeout expired" with
+# 2 pending updates, because the old handler searched (DuckDuckGo +
+# BGG, up to 40s) BEFORE replying to Telegram. Telegram times out
+# and the message is never answered. Now the handler replies
+# immediately and does the search + send in a background task.
 
-@app.post("/webhook")
-async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)):
-    if WEBHOOK_SECRET and x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
-        return {"ok": False}
-    update = await request.json()
-
+async def process_update(update: dict):
     cq = update.get("callback_query")
     if cq and cq.get("data") == "ask_boardgame":
         await api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": BUTTON_TOAST})
         await send_group(BUTTON_PROMPT)
-        return {"ok": True}
-
+        return
     msg = update.get("message")
     if not msg:
-        return {"ok": True}
+        return
     if msg.get("from", {}).get("is_bot"):
-        return {"ok": True}
+        return
     if msg.get("chat", {}).get("id") != CHAT_ID:
-        return {"ok": True}
+        return
     if msg.get("message_thread_id") is not None:
-        return {"ok": True}  # thread 11 reviews: never auto-answer
+        return  # thread 11 reviews: never auto-answer
     text = (msg.get("text") or "").strip()
     if not text:
-        return {"ok": True}
-
+        return
     kind = classify(text)
     if kind == "test":
-        return {"ok": True}
+        return
     if kind == "greeting":
         await send_group(GREETING, reply_to=msg["message_id"])
-        return {"ok": True}
+        return
     if kind == "non_board":
         await send_group(REDIRECT, reply_to=msg["message_id"])
-        return {"ok": True}
+        return
     if kind == "unclear":
-        # Not clearly a board-game question: do not guess, ask for detail.
         await send_group(
             "سوالت رو گرفتم، ولی مطمئن نیستم منظورت بردگیمه یا نه. "
             "اگه درباره‌ی یه بازی یا قانونه، اسم بازی رو هم بنویس تا جواب بدم.",
             reply_to=msg["message_id"],
         )
-        return {"ok": True}
-
+        return
     answer = await answer_board_question(text)
     await send_group(answer, reply_to=msg["message_id"])
+
+
+@app.post("/webhook")
+async def webhook(request: Request, background_tasks: BackgroundTasks, x_telegram_bot_api_secret_token: str | None = Header(default=None)):
+    if WEBHOOK_SECRET and x_telegram_bot_api_secret_token != WEBHOOK_SECRET:
+        return {"ok": False}
+    update = await request.json()
+    background_tasks.add_task(process_update, update)
     return {"ok": True}
 
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "bot": "BGWOmid_bot", "version": "v3-tabriz-fix"}
+    return {"ok": True, "bot": "BGWOmid_bot", "version": "v4-background"}
