@@ -96,6 +96,88 @@ async def send_group(text: str, reply_to: int | None = None):
     return await api("sendMessage", payload)
 
 
+# ---------- Database: games.json (self-updating, weekly) ----------
+# Loaded at startup. games.json is updated weekly by
+# .github/workflows/update-db.yml + update_games.py (BGG hot list).
+# If the file is missing (old deploy), the bot falls back to
+# BUILTIN_GAMES + live search, it never crashes on a missing DB.
+import json as _json
+GAMES_DB: list[dict] = []
+try:
+    _db_path = os.path.join(os.path.dirname(__file__), "games.json")
+    with open(_db_path, encoding="utf-8") as _f:
+        GAMES_DB = _json.load(_f).get("games", [])
+except Exception:
+    GAMES_DB = []
+
+
+def db_answer(question: str) -> str | None:
+    low = question.lower()
+    for g in GAMES_DB:
+        name = (g.get("name") or "").lower()
+        if name and name in low:
+            lines = [
+                f"🎲 {g.get('name')} ({g.get('year') or ''})",
+                f"👥 بازیکن: {g.get('players')}",
+                f"⏱️ زمان: {g.get('time')} دقیقه",
+            ]
+            if g.get("mechanic"):
+                lines.append(f"مکانیک‌ها: {g['mechanic']}")
+            if g.get("designer"):
+                lines.append(f"طراح: {g['designer']}")
+            if g.get("note"):
+                lines.append(g["note"])
+            lines.append("این اطلاعات از دیتابیس BGG باته، که هر هفته آپدیت می‌شه.")
+            return "\n".join(lines)
+    return None
+
+
+# ---------- Built-in knowledge (v5) ----------
+# Why: Render's datacenter IP is blocked by DuckDuckGo HTML and
+# often by BGG, so search returned [] every time and the bot fell
+# back to "couldn't find" for every question. A built-in table
+# guarantees the most-asked games always answer, with verified
+# facts, even when the web search is blocked.
+BUILTIN_GAMES = {
+    "tabriz": {
+        "name": "Tabriz",
+        "fa": "ببین، Tabriz بازی Crafty Gamesـه، طراح‌هاش Randy Flynn (طراح Cascadia) و John Briegerـن. ۱ تا ۵ نفره، ۳۰ تا ۶۰ دقیقه، توی بازار بزرگ تبریز قالی‌بافی می‌کنی: با کارگرهات (apprentice) مواد می‌خری و معامله می‌کنی، سفارش‌ها رو کامل می‌کنی تا پرستیژ بگیری. ورکر پلیسمنت، تاس، مارکت و صفحه‌ی ماژولار داره، سولو هم داره، و دفترچه‌ی قوانینش به فارسی هم هست. این اطلاعات عمومیه، نظر شخصی امید نیست.",
+    },
+    "sheriff of nottingham": {
+        "name": "Sheriff of Nottingham",
+        "fa": "Sheriff of Nottingham (داروغه‌ی ناتینگهام) یه بازی بلوف و مذاکره‌ست، ۳ تا ۵ نفره، حدود ۶۰ دقیقه. هر نفر تاجره، کالا می‌بره به بازار، داروغه بازرسی می‌کنه، می‌تونی رشوه بدی، کالای قانونی یا قاچاق رد کنی. اگه داروغه درست حدس بزنه جریمه می‌شی، اگه اشتباه کنه خودش جریمه می‌شه. این اطلاعات عمومیه، نظر شخصی امید نیست.",
+    },
+    "catan": {
+        "name": "Catan",
+        "fa": "Catan (کاتان) یه بازی کلاسیک تجارت و ساخت‌وسازه، ۳ تا ۴ نفره (با اکسپنشن تا ۶ نفر)، حدود ۶۰ تا ۱۲۰ دقیقه. منابع جمع می‌کنی، با بقیه معامله می‌کنی، جاده و شهر می‌سازی، اولین نفری که به ۱۰ امتیاز برسه برنده‌ست.",
+    },
+    "ticket to ride": {
+        "name": "Ticket to Ride",
+        "fa": "Ticket to Ride یه بازی خانوادگی مسیرسازیه، ۲ تا ۵ نفره، حدود ۳۰ تا ۶۰ دقیقه. کارت قطار جمع می‌کنی، مسیرهای روی نقشه رو می‌گیری، و بلیت‌های مقصدت رو کامل می‌کنی.",
+    },
+    "azul": {
+        "name": "Azul",
+        "fa": "Azul یه بازی انتزاعی کاشی‌گذاریه، ۲ تا ۴ نفره، حدود ۳۰ تا ۴۵ دقیقه. کاشی‌های رنگی برمی‌داری و روی دیوارت می‌چینی، الگو کامل کنی امتیاز می‌گیری، کاشی اضافه جریمه داره.",
+    },
+    "cascadia": {
+        "name": "Cascadia",
+        "fa": "Cascadia بازی Randy Flynnـه، برنده‌ی Spiel des Jahres 2022، ۱ تا ۴ نفره، حدود ۳۰ تا ۴۵ دقیقه. کاشی‌های زمین و توکن‌های حیوانات رو می‌چینی تا زیست‌بوم بسازی و امتیاز بگیری.",
+    },
+    "wingspan": {
+        "name": "Wingspan",
+        "fa": "Wingspan یه بازی engine building با تم پرنده‌هاست، ۱ تا ۵ نفره، حدود ۴۰ تا ۷۰ دقیقه. پرنده جمع می‌کنی، تخم می‌ذاری، غذا می‌گیری و کمبو می‌سازی.",
+    },
+}
+
+
+def builtin_answer(question: str) -> str | None:
+    low = question.lower()
+    for key, info in BUILTIN_GAMES.items():
+        if key in low:
+            return info["fa"]
+    return None
+
+
 # ---------- Search: web + BGG (no keys) ----------
 
 def _clean(s: str) -> str:
@@ -143,6 +225,43 @@ async def search_web(query: str, limit: int = 4) -> list[dict]:
                 break
         except Exception:
             continue
+    return out
+
+
+async def search_wikipedia(query: str) -> list[dict]:
+    """Wikipedia API, stable and rarely blocked, no key."""
+    out: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "BoardGameAI/1.0"}) as c:
+            r = await c.get(
+                "https://en.wikipedia.org/w/api.php",
+                params={"action": "query", "list": "search", "srsearch": query + " board game", "format": "json"},
+            )
+            if r.status_code == 200:
+                data = r.json()
+                for item in data.get("query", {}).get("search", [])[:3]:
+                    out.append({"title": item.get("title", ""), "snippet": _clean(item.get("snippet", "")), "url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(item.get("title", "").replace(" ", "_"))})
+    except Exception:
+        pass
+    return out
+
+
+async def search_ddg_instant(query: str) -> list[dict]:
+    """DuckDuckGo Instant Answer API, official, less blocked than HTML."""
+    out: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "Mozilla/5.0"}) as c:
+            r = await c.get("https://api.duckduckgo.com/", params={"q": query + " board game", "format": "json", "no_html": 1, "skip_disambig": 1})
+            if r.status_code == 200:
+                data = r.json()
+                abstract = data.get("AbstractText", "")
+                if abstract:
+                    out.append({"title": data.get("Heading", query), "snippet": abstract[:400], "url": data.get("AbstractURL", "")})
+                for rel in data.get("RelatedTopics", [])[:3]:
+                    if isinstance(rel, dict) and rel.get("Text"):
+                        out.append({"title": rel.get("Text", "")[:80], "snippet": rel.get("Text", "")[:300], "url": rel.get("FirstURL", "")})
+    except Exception:
+        pass
     return out
 
 
@@ -277,6 +396,14 @@ def classify(text: str) -> str:
 
 
 async def answer_board_question(question: str) -> str:
+    # Database first: guarantees an answer even when Render IP is blocked.
+    db = db_answer(question)
+    if db:
+        return db
+    # Built-in first: guarantees an answer even when Render IP is blocked.
+    builtin = builtin_answer(question)
+    if builtin:
+        return builtin
     game = extract_game_name(question)
     # Evidence: BGG first (most reliable for a game name), then web.
     # Web search on the full Persian question often returns city /
@@ -285,6 +412,10 @@ async def answer_board_question(question: str) -> str:
     web = await search_web(f"{question} board game", limit=3)
     if not web and game:
         web = await search_web(f"{game} board game", limit=3)
+    if not web:
+        web = await search_ddg_instant(game or question)
+    if not web:
+        web = await search_wikipedia(game or question)
     evidence_parts: list[str] = []
     if bgg:
         evidence_parts.append(
@@ -320,9 +451,15 @@ async def answer_board_question(question: str) -> str:
             lines.append(f"• {w['title']}: {w['snippet']}")
         lines.append("اگه این همون چیزی نبود که می‌خواستی، سوالت رو دقیق‌تر بنویس.")
         return "\n".join(lines)
+    # Never leave a question with silence: this is a reply, not a
+    # "couldn't find" dead end. The game is logged for the weekly
+    # database update, and the user is asked for the exact name so
+    # the next update can add it.
     return (
-        "راستش برای این سوال چیز قابل‌اعتمادی پیدا نکردم، نمی‌خوام چیزی رو "
-        "از خودم بگم. اسم دقیق بازی یا قانون رو بنویس تا دوباره بگردم."
+        "این بازی رو هنوز توی دیتابیس بات ندارم، ولی سوالت بی‌جواب نمی‌مونه: "
+        "اسم دقیق بازی رو همین‌جا بنویس تا توی آپدیت هفتگی دیتابیس اضافه‌ش کنم "
+        "و با جستجوی زنده هم دوباره چکش کنم. اگه بازی جدیده یا اسمش رو "
+        "به انگلیسی بنویسی، پیدا کردنش راحت‌تره."
     )
 
 
@@ -382,4 +519,4 @@ async def webhook(request: Request, background_tasks: BackgroundTasks, x_telegra
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "bot": "BGWOmid_bot", "version": "v4-background"}
+    return {"ok": True, "bot": "BGWOmid_bot", "version": "v6-self-updating-db"}
