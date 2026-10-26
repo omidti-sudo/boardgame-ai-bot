@@ -9,8 +9,8 @@ No polling, no cron. Render hosts this file.
 How it answers (in order, so it does not invent facts):
   1. Button / greeting / non-board-game: handled directly, instantly.
   2. Board-game question:
-     a. Search the web (DuckDuckGo, no key) + BoardGameGeek (free,
-        no key) for the question / game name. These are the evidence.
+     a. Search BGG FIRST (BoardGameGeek, free, no key), then Brave
+        Search API (key-based), then Wikipedia. No DISABLED-SEARCH at all.
      b. If an LLM is configured (LLM_API_KEY + LLM_API_URL, OpenAI-
         compatible chat completions), send the question + the search
         evidence to the LLM, with a strict Persian board-gamer prompt,
@@ -133,7 +133,7 @@ def db_answer(question: str) -> str | None:
 
 
 # ---------- Built-in knowledge (v5) ----------
-# Why: Render's datacenter IP is blocked by DuckDuckGo HTML and
+# Why: Render's datacenter IP is blocked by DISABLED-SEARCH HTML and
 # often by BGG, so search returned [] every time and the bot fell
 # back to "couldn't find" for every question. A built-in table
 # guarantees the most-asked games always answer, with verified
@@ -185,52 +185,11 @@ def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-async def search_web(query: str, limit: int = 4) -> list[dict]:
-    """DuckDuckGo search, no API key. Tries html, then lite, then
-    a plain duckduckgo.com search. Render IPs are often bot-blocked
-    on one endpoint, so falling back matters."""
-    out: list[dict] = []
-    urls = [
-        "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query),
-        "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote(query),
-        "https://duckduckgo.com/html/?q=" + urllib.parse.quote(query),
-    ]
-    for url in urls:
-        try:
-            async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "Mozilla/5.0"}) as c:
-                r = await c.get(url)
-            if r.status_code != 200:
-                continue
-            body = r.text
-            for m in re.finditer(
-                r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result__snippet"[^>]*>(.*?)</a>',
-                body, re.S):
-                href, title, snippet = m.groups()
-                mm = re.search(r"uddg=([^&]+)", href)
-                if mm:
-                    href = urllib.parse.unquote(mm.group(1))
-                out.append({"title": _clean(title), "snippet": _clean(snippet), "url": href})
-                if len(out) >= limit:
-                    break
-            # Lite endpoint uses result-link / result-snippet classes.
-            if not out:
-                for m in re.finditer(
-                    r'class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?class="result-snippet"[^>]*>(.*?)</td>',
-                    body, re.S):
-                    href, title, snippet = m.groups()
-                    out.append({"title": _clean(title), "snippet": _clean(snippet), "url": href})
-                    if len(out) >= limit:
-                        break
-            if out:
-                break
-        except Exception:
-            continue
-    return out
 
 
 async def search_brave(query: str, limit: int = 4) -> list[dict]:
     """Brave Search API — official, key-based, NOT blocked like
-    DuckDuckGo HTML scraping. Env: BRAVE_API_KEY.
+    DISABLED-SEARCH HTML scraping. Env: BRAVE_API_KEY.
     Free tier: 2,000 queries/month (as of 2026, check brave.com/search/api).
     Endpoint: https://api.search.brave.com/res/v1/web/search"""
     key = os.environ.get("BRAVE_API_KEY", "")
@@ -296,23 +255,6 @@ async def search_wikipedia(query: str) -> list[dict]:
     return out
 
 
-async def search_ddg_instant(query: str) -> list[dict]:
-    """DuckDuckGo Instant Answer API, official, less blocked than HTML."""
-    out: list[dict] = []
-    try:
-        async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "Mozilla/5.0"}) as c:
-            r = await c.get("https://api.duckduckgo.com/", params={"q": query + " board game", "format": "json", "no_html": 1, "skip_disambig": 1})
-            if r.status_code == 200:
-                data = r.json()
-                abstract = data.get("AbstractText", "")
-                if abstract:
-                    out.append({"title": data.get("Heading", query), "snippet": abstract[:400], "url": data.get("AbstractURL", "")})
-                for rel in data.get("RelatedTopics", [])[:3]:
-                    if isinstance(rel, dict) and rel.get("Text"):
-                        out.append({"title": rel.get("Text", "")[:80], "snippet": rel.get("Text", "")[:300], "url": rel.get("FirstURL", "")})
-    except Exception:
-        pass
-    return out
 
 
 async def bgg_search(game_query: str) -> dict | None:
@@ -460,17 +402,13 @@ async def answer_board_question(question: str) -> str:
     # unrelated results, so also search "game + board game" in English.
     bgg = await bgg_search(game) if game else None
     # Official key-based search FIRST (v7): Brave / Tavily are built
-    # for bots and are not blocked like DuckDuckGo HTML scraping.
+    # for bots and are not blocked like DISABLED-SEARCH HTML scraping.
     # If no key is set, these return [] and we fall back below.
+    # Live search order (owner, 2026-10-25): BGG FIRST, then Brave,
+    # then Tavily, then Wikipedia. NO DDG at all.
     web = await search_brave(game or question, limit=3)
     if not web:
         web = await search_tavily(game or question, limit=3)
-    if not web:
-        web = await search_web(f"{question} board game", limit=3)
-    if not web and game:
-        web = await search_web(f"{game} board game", limit=3)
-    if not web:
-        web = await search_ddg_instant(game or question)
     if not web:
         web = await search_wikipedia(game or question)
     evidence_parts: list[str] = []
@@ -522,7 +460,7 @@ async def answer_board_question(question: str) -> str:
 
 # ---------- Webhook ----------
 # Fix 2026-10-25 v4: Telegram reported "Read timeout expired" with
-# 2 pending updates, because the old handler searched (DuckDuckGo +
+# 2 pending updates, because the old handler searched (DISABLED-SEARCH +
 # BGG, up to 40s) BEFORE replying to Telegram. Telegram times out
 # and the message is never answered. Now the handler replies
 # immediately and does the search + send in a background task.
@@ -576,4 +514,4 @@ async def webhook(request: Request, background_tasks: BackgroundTasks, x_telegra
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "bot": "BGWOmid_bot", "version": "v7-brave-search-api"}
+    return {"ok": True, "bot": "BGWOmid_bot", "version": "v8-bgg-first-no-ddg"}
