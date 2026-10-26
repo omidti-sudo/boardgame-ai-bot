@@ -228,6 +228,56 @@ async def search_web(query: str, limit: int = 4) -> list[dict]:
     return out
 
 
+async def search_brave(query: str, limit: int = 4) -> list[dict]:
+    """Brave Search API — official, key-based, NOT blocked like
+    DuckDuckGo HTML scraping. Env: BRAVE_API_KEY.
+    Free tier: 2,000 queries/month (as of 2026, check brave.com/search/api).
+    Endpoint: https://api.search.brave.com/res/v1/web/search"""
+    key = os.environ.get("BRAVE_API_KEY", "")
+    if not key:
+        return []
+    out: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                params={"q": query + " board game", "count": limit},
+                headers={"Accept": "application/json", "X-Subscription-Token": key},
+            )
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            for item in data.get("web", {}).get("results", [])[:limit]:
+                out.append({"title": item.get("title", ""), "snippet": item.get("description", ""), "url": item.get("url", "")})
+    except Exception:
+        pass
+    return out
+
+
+async def search_tavily(query: str, limit: int = 4) -> list[dict]:
+    """Tavily AI search API — official, key-based, built for AI agents.
+    Env: TAVILY_API_KEY. Free tier available at tavily.com."""
+    key = os.environ.get("TAVILY_API_KEY", "")
+    if not key:
+        return []
+    out: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(
+                "https://api.tavily.com/search",
+                headers={"Content-Type": "application/json", "tavily-api-key": key},
+                json={"query": query + " board game", "max_results": limit, "search_depth": "basic"},
+            )
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            for item in data.get("results", [])[:limit]:
+                out.append({"title": item.get("title", ""), "snippet": item.get("content", "")[:400], "url": item.get("url", "")})
+    except Exception:
+        pass
+    return out
+
+
 async def search_wikipedia(query: str) -> list[dict]:
     """Wikipedia API, stable and rarely blocked, no key."""
     out: list[dict] = []
@@ -409,7 +459,14 @@ async def answer_board_question(question: str) -> str:
     # Web search on the full Persian question often returns city /
     # unrelated results, so also search "game + board game" in English.
     bgg = await bgg_search(game) if game else None
-    web = await search_web(f"{question} board game", limit=3)
+    # Official key-based search FIRST (v7): Brave / Tavily are built
+    # for bots and are not blocked like DuckDuckGo HTML scraping.
+    # If no key is set, these return [] and we fall back below.
+    web = await search_brave(game or question, limit=3)
+    if not web:
+        web = await search_tavily(game or question, limit=3)
+    if not web:
+        web = await search_web(f"{question} board game", limit=3)
     if not web and game:
         web = await search_web(f"{game} board game", limit=3)
     if not web:
@@ -519,4 +576,4 @@ async def webhook(request: Request, background_tasks: BackgroundTasks, x_telegra
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "bot": "BGWOmid_bot", "version": "v6-self-updating-db"}
+    return {"ok": True, "bot": "BGWOmid_bot", "version": "v7-brave-search-api"}
